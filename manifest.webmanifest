@@ -1,0 +1,13 @@
+{
+  "name": "Staff - Boletos",
+  "short_name": "Staff",
+  "start_url": "/staff/index.html",
+  "scope": "/staff/",
+  "display": "standalone",
+  "background_color": "#0b1220",
+  "theme_color": "#111827",
+  "icons": [
+    { "src": "/staff/icons/icon.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/staff/icons/icon.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
