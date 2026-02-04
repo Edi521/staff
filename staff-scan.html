@@ -253,6 +253,9 @@
   let videoStream = null;
 
   let scanning = false;
+  let scannerSessionId = 0;     // ✅ invalida loops viejos
+let startInProgress = false;  // ✅ evita doble start
+
   let scannerRunning = false;
 
   // Evita doble carga si detecta el QR varias veces
@@ -534,17 +537,18 @@
   }
 
   function doClear_(){
-    currentToken = "";
-    lastScannedText = "";
-    isProcessingTicket = false;
+  currentToken = "";
+  lastScannedText = "";
+  isProcessingTicket = false;
 
-    $("tokenInput").value = "";
-    clearMsgs();
-    clearTicketUI_();
-    setLoading_(false);
+  $("tokenInput").value = "";
+  clearMsgs();
+  clearTicketUI_();
+  setLoading_(false);
 
-    restartScanner_(); // ✅ reanuda seguro
-  }
+  restartScanner_(); // ✅ en vez de resumeScanner_
+}
+
 
   // ============================
   // Cámara + scanner
@@ -583,92 +587,106 @@
   }
 
   async function scanLoop_(){
-    const video = $("video");
+  const video = $("video");
+  const mySession = scannerSessionId; // ✅ “este” arranque
 
-    // 1) BarcodeDetector si soporta qr_code
-    if ("BarcodeDetector" in window) {
-      try {
-        const formats = await BarcodeDetector.getSupportedFormats();
-        if (Array.isArray(formats) && formats.includes("qr_code")) {
-          const detector = new BarcodeDetector({ formats: ["qr_code"] });
-          scanning = true;
-
-          while (scanning) {
-            if (currentToken || isProcessingTicket) { await sleep_(200); continue; }
-
-            try {
-              const barcodes = await detector.detect(video);
-              if (barcodes?.length) {
-                const raw = barcodes[0].rawValue || "";
-                const token = extractTokenFromQrText(raw);
-                if (token) {
-                  setLoading_(true, "QR detectado…");
-                  await loadAndShowTicket_(token, raw);
-                  await sleep_(700);
-                }
-              }
-            } catch(_) {}
-            await sleep_(120);
-          }
-          return;
-        }
-      } catch(_) {}
-    }
-
-    // 2) ZXing fallback
-    await loadZxingIfNeeded_();
-
-    if (!(window.ZXingBrowser?.BrowserQRCodeReader)) {
-      showError("No se pudo cargar el lector QR (ZXing). Usa búsqueda manual.");
-      return;
-    }
-
-    zxingReader = new ZXingBrowser.BrowserQRCodeReader();
-    scanning = true;
-
+  // 1) BarcodeDetector
+  if ("BarcodeDetector" in window) {
     try {
-      await zxingReader.decodeFromVideoElement(video, async (result) => {
-        if (!scanning) return;
-        if (currentToken || isProcessingTicket) return;
+      const formats = await BarcodeDetector.getSupportedFormats();
+      if (Array.isArray(formats) && formats.includes("qr_code")) {
+        const detector = new BarcodeDetector({ formats: ["qr_code"] });
+        scanning = true;
 
-        if (result) {
-          const raw = result.getText ? result.getText() : "";
-          const token = extractTokenFromQrText(raw);
-          if (token) {
-            setLoading_(true, "QR detectado…");
-            await loadAndShowTicket_(token, raw);
-            await sleep_(700);
-          }
+        while (scanning && mySession === scannerSessionId) {
+          if (currentToken || isProcessingTicket) { await sleep_(150); continue; }
+
+          try {
+            const barcodes = await detector.detect(video);
+            if (mySession !== scannerSessionId) break;
+
+            if (barcodes?.length) {
+              const raw = barcodes[0].rawValue || "";
+              const token = extractTokenFromQrText(raw);
+              if (token) {
+                setLoading_(true, "QR detectado…");
+                await loadAndShowTicket_(token, raw);
+                await sleep_(400);
+              }
+            }
+          } catch(_) {}
+
+          await sleep_(120);
         }
-      });
-    } catch(e){
+        return;
+      }
+    } catch(_) {}
+  }
+
+  // 2) ZXing fallback
+  await loadZxingIfNeeded_();
+  if (!(window.ZXingBrowser?.BrowserQRCodeReader)) {
+    showError("No se pudo cargar el lector QR (ZXing). Usa búsqueda manual.");
+    return;
+  }
+
+  zxingReader = new ZXingBrowser.BrowserQRCodeReader();
+  scanning = true;
+
+  try {
+    await zxingReader.decodeFromVideoElement(video, async (result) => {
+      if (!scanning) return;
+      if (mySession !== scannerSessionId) return;
+      if (currentToken || isProcessingTicket) return;
+
+      if (result) {
+        const raw = result.getText ? result.getText() : "";
+        const token = extractTokenFromQrText(raw);
+        if (token) {
+          setLoading_(true, "QR detectado…");
+          await loadAndShowTicket_(token, raw);
+          await sleep_(400);
+        }
+      }
+    });
+  } catch(e){
+    if (mySession === scannerSessionId) {
       showError("No se pudo iniciar el lector QR. Revisa permisos de cámara.");
     }
   }
+}
 
   function stopScanner_(){
-    scanning = false;
+  // ✅ invalida cualquier loop viejo
+  scannerSessionId++;
+  scanning = false;
+  scannerRunning = false;
 
-    if (zxingReader) {
-      try { zxingReader.reset(); } catch(_) {}
-      zxingReader = null;
-    }
+  // ZXing
+  if (zxingReader) {
+    try { zxingReader.reset(); } catch(_) {}
+    zxingReader = null;
+  }
 
-    const video = $("video");
-    if (video) {
-      try { video.pause(); } catch(_) {}
-      try { video.srcObject = null; } catch(_) {}
-    }
+  // Video element
+  const video = $("video");
+  if (video) {
+    try { video.pause(); } catch(_) {}
+    try { video.srcObject = null; } catch(_) {}
+  }
 
-    if (videoStream){
+  // MediaStream
+  if (videoStream){
+    try {
       for (const t of videoStream.getTracks()) {
         try { t.stop(); } catch(_) {}
       }
+    } finally {
       videoStream = null;
     }
-
-    scannerRunning = false;
   }
+}
+
 
   function pauseScanner_(){
     stopScanner_();
@@ -676,31 +694,39 @@
   }
 
   function startScanner_(){
-    if (!enforceAuthOrRedirect_()) return;
-    if (scannerRunning) return;
+  if (!enforceAuthOrRedirect_()) return;
+  if (scannerRunning || startInProgress) return;
 
-    scannerRunning = true;
-    clearMsgs();
-    setLoading_(false);
-    setSubtitle("Escaneando…");
+  startInProgress = true;
+  scannerRunning = true;
 
-    (async () => {
-      try {
-        await startCamera_();
-        await scanLoop_();
-      } catch(e){
-        console.error(e);
-        showError("No se pudo iniciar cámara/lector. Revisa permisos o prueba en HTTPS.");
-      } finally {
-        scannerRunning = false;
-      }
-    })();
-  }
+  clearMsgs();
+  setLoading_(false);
+  setSubtitle("Escaneando…");
 
-  function restartScanner_(){
-    stopScanner_();
-    setTimeout(() => startScanner_(), 150); // pequeño delay para liberar cámara
-  }
+  (async () => {
+    try {
+      await startCamera_();
+      await scanLoop_();
+    } catch (e) {
+      console.error(e);
+      showError("No se pudo iniciar cámara/lector. Revisa permisos.");
+    } finally {
+      startInProgress = false;
+      scannerRunning = false;
+    }
+  })();
+}
+
+function restartScanner_(){
+  // ✅ stop + pequeño delay para que el navegador libere la cámara
+  stopScanner_();
+  setTimeout(() => {
+    // ✅ importante: currentToken debe estar vacío para escanear
+    startScanner_();
+  }, 450);
+}
+
 
   // ============================
   // INIT
