@@ -238,7 +238,7 @@
 
   <!--<script src="https://unpkg.com/@zxing/browser@0.1.4/umd/index.min.js"></script>-->
 
-<script>
+  <script>
   // ============================
   // CONFIG
   // ============================
@@ -253,6 +253,9 @@
   let videoStream = null;
   let scanning = false;
   let scannerRunning = false;
+
+  // ✅ Evita doble carga si detecta el QR varias veces
+  let isProcessingTicket = false;
 
   const $ = (id) => document.getElementById(id);
 
@@ -277,6 +280,18 @@
     $("errorBox").textContent = "";
     $("okBox").style.display = "none";
     $("okBox").textContent = "";
+  }
+
+  // ============================
+  // LOADER (Overlay + Spinner)
+  // ============================
+  function setLoading_(on, msg){
+    const ov = $("scanOverlay");
+    if (!ov) return;
+
+    ov.style.display = on ? "flex" : "none";
+    const t = ov.querySelector(".scanText");
+    if (t) t.textContent = msg || (on ? "Leyendo QR…" : "");
   }
 
   // ============================
@@ -406,35 +421,50 @@
 
   async function loadAndShowTicket_(token, scannedText){
     if (!enforceAuthOrRedirect_()) return;
+    if (isProcessingTicket) return;
 
+    isProcessingTicket = true;
     clearMsgs();
+
     setSubtitle("Buscando…");
+    setLoading_(true, "Validando pase…");
 
-    const data = await apiGetTicket(token);
+    try{
+      const data = await apiGetTicket(token);
 
-    if (!data.ok){
-      clearTicketUI_();
-      setSubtitle("No encontrado");
-      showError("Pase no encontrado o token inválido.");
-      return;
+      if (!data.ok){
+        clearTicketUI_();
+        setSubtitle("No encontrado");
+        showError("Pase no encontrado o token inválido.");
+        return;
+      }
+
+      touchAuth_();
+
+      currentToken = token;
+      lastScannedText = scannedText || "";
+
+      setSubtitle("Pase cargado");
+      showOk("✅ Pase cargado. Cámara en pausa (presiona Limpiar para escanear otro).");
+      showTicketUI_(data.ticket, scannedText || token);
+
+      pauseScanner_();
+    } catch(e){
+      console.error(e);
+      setSubtitle("Error");
+      showError("Error al consultar el pase: " + (e?.message || e));
+    } finally {
+      setLoading_(false);
+      isProcessingTicket = false;
     }
-
-    touchAuth_();
-
-    currentToken = token;
-    lastScannedText = scannedText || "";
-
-    setSubtitle("Pase cargado");
-    showOk("✅ Pase cargado. Cámara en pausa (presiona Limpiar para escanear otro).");
-    showTicketUI_(data.ticket, scannedText || token);
-
-    pauseScanner_();
   }
 
   async function doManualSearch_(){
     if (!enforceAuthOrRedirect_()) return;
+
     const token = ($("tokenInput").value || "").trim();
     if (!token) { showError("Pega un token para buscar."); return; }
+
     await loadAndShowTicket_(token, token);
   }
 
@@ -456,6 +486,7 @@
     const btn = $("btnCheckin");
     btn.disabled = true;
     btn.textContent = "Marcando…";
+    setLoading_(true, "Marcando llegada…");
 
     try{
       clearMsgs();
@@ -476,6 +507,7 @@
       console.error(e);
       showError("Error en check-in: " + (e?.message || e));
     } finally {
+      setLoading_(false);
       btn.disabled = false;
       btn.textContent = "Marcar llegada";
     }
@@ -484,9 +516,13 @@
   function doClear_(){
     currentToken = "";
     lastScannedText = "";
+    isProcessingTicket = false;
+
     $("tokenInput").value = "";
     clearMsgs();
     clearTicketUI_();
+    setLoading_(false);
+
     resumeScanner_();
   }
 
@@ -505,14 +541,12 @@
     await video.play();
   }
 
-  // 🔑 Cargar ZXing SIEMPRE que haga falta (porque tu script inline corre antes)
   function loadZxingIfNeeded_(){
     return new Promise((resolve, reject) => {
       if (window.ZXingBrowser?.BrowserQRCodeReader) return resolve();
 
       const existing = document.querySelector('script[data-zxing="1"]');
       if (existing) {
-        // esperar a que termine de cargar
         existing.addEventListener("load", resolve, { once:true });
         existing.addEventListener("error", () => reject(new Error("ZXing no cargó")), { once:true });
         return;
@@ -523,7 +557,7 @@
       s.defer = true;
       s.setAttribute("data-zxing","1");
       s.onload = resolve;
-      s.onerror = () => reject(new Error("No se pudo cargar ZXing (red/bloqueo)."));
+      s.onerror = () => reject(new Error("No se pudo cargar ZXing."));
       document.head.appendChild(s);
     });
   }
@@ -531,7 +565,7 @@
   async function scanLoop_(){
     const video = $("video");
 
-    // 1) BarcodeDetector si soporta qr_code
+    // BarcodeDetector
     if ("BarcodeDetector" in window) {
       try {
         const formats = await BarcodeDetector.getSupportedFormats();
@@ -540,7 +574,7 @@
           scanning = true;
 
           while (scanning) {
-            if (currentToken) { await sleep_(250); continue; }
+            if (currentToken || isProcessingTicket) { await sleep_(200); continue; }
 
             try {
               const barcodes = await detector.detect(video);
@@ -548,6 +582,8 @@
                 const raw = barcodes[0].rawValue || "";
                 const token = extractTokenFromQrText(raw);
                 if (token) {
+                  // ✅ feedback inmediato
+                  setLoading_(true, "QR detectado…");
                   await loadAndShowTicket_(token, raw);
                   await sleep_(700);
                 }
@@ -557,12 +593,10 @@
           }
           return;
         }
-      } catch(_) {
-        // seguimos a ZXing
-      }
+      } catch(_) {}
     }
 
-    // 2) ZXing fallback
+    // ZXing fallback
     await loadZxingIfNeeded_();
 
     if (!(window.ZXingBrowser?.BrowserQRCodeReader)) {
@@ -576,12 +610,14 @@
     try {
       await zxingReader.decodeFromVideoElement(video, async (result, err) => {
         if (!scanning) return;
-        if (currentToken) return;
+        if (currentToken || isProcessingTicket) return;
 
         if (result) {
           const raw = result.getText ? result.getText() : "";
           const token = extractTokenFromQrText(raw);
           if (token) {
+            // ✅ feedback inmediato
+            setLoading_(true, "QR detectado…");
             await loadAndShowTicket_(token, raw);
             await sleep_(700);
           }
@@ -625,6 +661,7 @@
     if (scannerRunning) return;
 
     clearMsgs();
+    setLoading_(false);
     setSubtitle("Escaneando…");
 
     scannerRunning = true;
@@ -645,10 +682,6 @@
   document.addEventListener("DOMContentLoaded", () => {
     if (!enforceAuthOrRedirect_()) return;
 
-    document.addEventListener("visibilitychange", () => {
-      if (!document.hidden) enforceAuthOrRedirect_();
-    });
-
     $("logoutBtn").addEventListener("click", logout_);
     $("btnBuscar").addEventListener("click", doManualSearch_);
     $("tokenInput").addEventListener("keydown", (e)=> { if (e.key === "Enter") doManualSearch_(); });
@@ -660,6 +693,7 @@
     window.addEventListener("beforeunload", stopCamera_);
   });
 </script>
+
 
 
 
