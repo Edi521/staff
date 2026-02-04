@@ -533,20 +533,26 @@
   }
 
   // ✅ CLAVE: Limpiar debe reiniciar sin setTimeout para no perder gesto
-  async function doClear_(){
-    currentToken = "";
-    lastScannedText = "";
-    isProcessingTicket = false;
+  function doClear_(){
+  // 1) detener lector/cámara sí o sí
+  stopScanner_();
 
-    $("tokenInput").value = "";
-    clearMsgs();
-    clearTicketUI_();
-    setLoading_(false);
+  // 2) limpiar estados/UI (opcional)
+  currentToken = "";
+  lastScannedText = "";
+  isProcessingTicket = false;
 
-    // reinicio fuerte
-    stopScanner_();
-    await startScannerNow_(); // ✅ sin setTimeout (mantiene user gesture)
-  }
+  $("tokenInput").value = "";
+  clearMsgs();
+  clearTicketUI_();
+  setLoading_(false);
+
+  // 3) recargar forzando URL nueva (evita cache)
+  const u = new URL(location.href);
+  u.searchParams.set("r", String(Date.now())); // cache-bust
+  location.replace(u.toString());
+}
+
 
   // ============================
   // Cámara + scanner
@@ -729,7 +735,7 @@
     $("btnCheckin").addEventListener("click", doCheckin_);
 
     // ✅ importante: mantener gesto => doClear_ es async y reinicia sin setTimeout
-    $("btnLimpiar").addEventListener("click", () => doClear_());
+    $("btnLimpiar").addEventListener("click", doClear_);
 
     // arranque inicial
     startScannerNow_();
