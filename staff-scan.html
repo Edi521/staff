@@ -238,7 +238,7 @@
 
   <!--<script src="https://unpkg.com/@zxing/browser@0.1.4/umd/index.min.js"></script>-->
 
-  <script>
+<script>
   // ============================
   // CONFIG
   // ============================
@@ -251,11 +251,16 @@
 
   let zxingReader = null;
   let videoStream = null;
+
   let scanning = false;
   let scannerRunning = false;
 
-  // ✅ Evita doble carga si detecta el QR varias veces
+  // Evita doble carga si detecta el QR varias veces
   let isProcessingTicket = false;
+
+  // Ticket actual
+  let currentToken = "";
+  let lastScannedText = "";
 
   const $ = (id) => document.getElementById(id);
 
@@ -288,7 +293,6 @@
   function setLoading_(on, msg){
     const ov = $("scanOverlay");
     if (!ov) return;
-
     ov.style.display = on ? "flex" : "none";
     const t = ov.querySelector(".scanText");
     if (t) t.textContent = msg || (on ? "Leyendo QR…" : "");
@@ -326,7 +330,7 @@
   }
 
   function logout_(){
-    stopCamera_();
+    stopScanner_();
     clearAuth_();
     location.replace("./index.html");
   }
@@ -384,36 +388,36 @@
     $("tStatus").innerHTML = `<span class="${cls}">${label}</span>`;
   }
 
-  function setQrPreview(text){
-    const container = $("qrOut");
-    container.innerHTML = "";
-    if (typeof QRCode === "undefined") return;
-    new QRCode(container, { text, width: 260, height: 260, correctLevel: QRCode.CorrectLevel.M });
+  function updateCheckinButton_(status){
+    const s = String(status || "").toUpperCase();
+    const btn = $("btnCheckin");
+
+    const isUsed = (s === "USED");
+    const isInvalid = (s === "CANCELED" || s === "EXPIRED");
+
+    if (isUsed || isInvalid) {
+      btn.disabled = true;
+      btn.textContent = isUsed ? "Ya utilizado" : "No válido";
+      btn.classList.add("danger");
+    } else {
+      btn.disabled = false;
+      btn.textContent = "Marcar llegada";
+      btn.classList.remove("danger");
+    }
   }
 
   function showTicketUI_(ticket, scannedText){
     $("ticketBox").style.display = "block";
     $("actionsBox").style.display = "grid";
 
-    setStatusBadge(ticket.estatus || ticket.status);
+    const status = (ticket.estatus || ticket.status || "").toUpperCase();
+
+    setStatusBadge(status);
     $("tNombre").textContent = ticket.nombre || "-";
     $("tAsiento").textContent = ticket.asiento || "-";
     $("tFechaHora").textContent = ticket.fechaHora || "-";
 
-    //setQrPreview(scannedText || "");
-
-    // 👉 Control del botón según estatus
-  const btn = $("btnCheckin");
-
-  if (status === "USED") {
-    btn.disabled = true;
-    btn.textContent = "Ya utilizado";
-    btn.classList.add("danger");
-  } else {
-    btn.disabled = false;
-    btn.textContent = "Marcar llegada";
-    btn.classList.remove("danger");
-  }
+    updateCheckinButton_(status);
   }
 
   function clearTicketUI_(){
@@ -429,16 +433,12 @@
   // ============================
   // Flujo
   // ============================
-  let currentToken = "";
-  let lastScannedText = "";
-
   async function loadAndShowTicket_(token, scannedText){
     if (!enforceAuthOrRedirect_()) return;
     if (isProcessingTicket) return;
 
     isProcessingTicket = true;
     clearMsgs();
-
     setSubtitle("Buscando…");
     setLoading_(true, "Validando pase…");
 
@@ -497,6 +497,9 @@
     if (!currentToken) { showError("No hay ticket cargado."); return; }
 
     const btn = $("btnCheckin");
+    // Si ya está deshabilitado (USED), no hacer nada
+    if (btn.disabled) return;
+
     btn.disabled = true;
     btn.textContent = "Marcando…";
     setLoading_(true, "Marcando llegada…");
@@ -515,14 +518,18 @@
       touchAuth_();
       showOk(r.alreadyUsed ? "⚠️ Este pase YA estaba usado." : "✅ Llegada marcada.");
 
+      // refrescar ticket (aquí se aplicará el bloqueo si queda USED)
       await loadAndShowTicket_(currentToken, lastScannedText || currentToken);
     } catch(e){
       console.error(e);
       showError("Error en check-in: " + (e?.message || e));
     } finally {
       setLoading_(false);
-      btn.disabled = false;
-      btn.textContent = "Marcar llegada";
+      // NO forzamos a habilitar el botón aquí:
+      // showTicketUI_ decide si se bloquea según status.
+      if (!$("btnCheckin").disabled) {
+        $("btnCheckin").textContent = "Marcar llegada";
+      }
     }
   }
 
@@ -536,7 +543,7 @@
     clearTicketUI_();
     setLoading_(false);
 
-    resumeScanner_();
+    restartScanner_(); // ✅ reanuda seguro
   }
 
   // ============================
@@ -578,7 +585,7 @@
   async function scanLoop_(){
     const video = $("video");
 
-    // BarcodeDetector
+    // 1) BarcodeDetector si soporta qr_code
     if ("BarcodeDetector" in window) {
       try {
         const formats = await BarcodeDetector.getSupportedFormats();
@@ -595,7 +602,6 @@
                 const raw = barcodes[0].rawValue || "";
                 const token = extractTokenFromQrText(raw);
                 if (token) {
-                  // ✅ feedback inmediato
                   setLoading_(true, "QR detectado…");
                   await loadAndShowTicket_(token, raw);
                   await sleep_(700);
@@ -609,7 +615,7 @@
       } catch(_) {}
     }
 
-    // ZXing fallback
+    // 2) ZXing fallback
     await loadZxingIfNeeded_();
 
     if (!(window.ZXingBrowser?.BrowserQRCodeReader)) {
@@ -621,7 +627,7 @@
     scanning = true;
 
     try {
-      await zxingReader.decodeFromVideoElement(video, async (result, err) => {
+      await zxingReader.decodeFromVideoElement(video, async (result) => {
         if (!scanning) return;
         if (currentToken || isProcessingTicket) return;
 
@@ -629,7 +635,6 @@
           const raw = result.getText ? result.getText() : "";
           const token = extractTokenFromQrText(raw);
           if (token) {
-            // ✅ feedback inmediato
             setLoading_(true, "QR detectado…");
             await loadAndShowTicket_(token, raw);
             await sleep_(700);
@@ -641,7 +646,7 @@
     }
   }
 
-  function stopCamera_(){
+  function stopScanner_(){
     scanning = false;
 
     if (zxingReader) {
@@ -661,32 +666,40 @@
       }
       videoStream = null;
     }
-  }
 
-  function pauseScanner_(){
-    stopCamera_();
-    setSubtitle("Pase cargado (cámara en pausa)");
     scannerRunning = false;
   }
 
-  async function resumeScanner_(){
+  function pauseScanner_(){
+    stopScanner_();
+    setSubtitle("Pase cargado (cámara en pausa)");
+  }
+
+  function startScanner_(){
     if (!enforceAuthOrRedirect_()) return;
     if (scannerRunning) return;
 
+    scannerRunning = true;
     clearMsgs();
     setLoading_(false);
     setSubtitle("Escaneando…");
 
-    scannerRunning = true;
-    try {
-      await startCamera_();
-      await scanLoop_();
-    } catch(e){
-      console.error(e);
-      showError("No se pudo iniciar cámara/lector. Revisa permisos o prueba en HTTPS.");
-    } finally {
-      scannerRunning = false;
-    }
+    (async () => {
+      try {
+        await startCamera_();
+        await scanLoop_();
+      } catch(e){
+        console.error(e);
+        showError("No se pudo iniciar cámara/lector. Revisa permisos o prueba en HTTPS.");
+      } finally {
+        scannerRunning = false;
+      }
+    })();
+  }
+
+  function restartScanner_(){
+    stopScanner_();
+    setTimeout(() => startScanner_(), 150); // pequeño delay para liberar cámara
   }
 
   // ============================
@@ -702,10 +715,11 @@
     $("btnCheckin").addEventListener("click", doCheckin_);
     $("btnLimpiar").addEventListener("click", doClear_);
 
-    resumeScanner_();
-    window.addEventListener("beforeunload", stopCamera_);
+    startScanner_();
+    window.addEventListener("beforeunload", stopScanner_);
   });
 </script>
+
 
 
 
