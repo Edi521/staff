@@ -401,6 +401,19 @@
     $("tFechaHora").textContent = ticket.fechaHora || "-";
 
     //setQrPreview(scannedText || "");
+
+    // 👉 Control del botón según estatus
+  const btn = $("btnCheckin");
+
+  if (status === "USED") {
+    btn.disabled = true;
+    btn.textContent = "Ya utilizado";
+    btn.classList.add("danger");
+  } else {
+    btn.disabled = false;
+    btn.textContent = "Marcar llegada";
+    btn.classList.remove("danger");
+  }
   }
 
   function clearTicketUI_(){
