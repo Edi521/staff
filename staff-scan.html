@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Staff · Escáner</title>
 
-  <link rel="icon" href="./icons/icon.png" type="image/png">
-  <link rel="manifest" href="manifest.webmanifest?v=2" />
+  <link rel="icon" href="./icon.png" type="image/png">
+  <link rel="manifest" href="manifest.webmanifest?v=3" />
   <meta name="theme-color" content="#111827" />
 
   <style>
@@ -220,10 +220,6 @@
     @keyframes spin {
       to { transform: rotate(360deg); }
     }
-
-    #scanCanvas {
-      display: none;
-    }
   </style>
 </head>
 
@@ -246,7 +242,6 @@
         <div class="muted">Escanea el QR del pase.</div>
 
         <video id="video" playsinline autoplay muted></video>
-        <canvas id="scanCanvas"></canvas>
 
         <div id="scanOverlay" class="scanOverlay" style="display:none;">
           <div class="spinner"></div>
@@ -293,7 +288,8 @@
     </div>
   </div>
 
-  <script src="./libs/jsQR.js"></script>
+  <!-- ZXing desde CDN -->
+  <script src="https://unpkg.com/@zxing/browser@0.1.4/umd/index.min.js"></script>
 
   <script>
     const API_URL = "https://script.google.com/macros/s/AKfycbxb7tNEfgSrmGHAYDYR76rJw3eS9XJ2XG2JaDppxiS1ls0j_iQJck5599wGbkBlvxezZg/exec";
@@ -303,11 +299,13 @@
     const PIN_KEY = "staffPin";
     const AUTH_TTL_MS = 8 * 60 * 60 * 1000;
 
+    let zxingReader = null;
     let videoStream = null;
+
+    let scanning = false;
     let scannerRunning = false;
     let startInProgress = false;
     let scannerSessionId = 0;
-    let scanFrameTimer = null;
     let isProcessingTicket = false;
 
     let currentToken = "";
@@ -357,28 +355,34 @@
     function showError(msg) {
       const b = $("errorBox");
       const ok = $("okBox");
+
       if (b) {
         b.style.display = "block";
         b.textContent = msg;
       }
+
       if (ok) {
         ok.style.display = "none";
         ok.textContent = "";
       }
-      autoHideMsgs_(4000);
+
+      autoHideMsgs_(4500);
     }
 
     function showOk(msg) {
       const b = $("okBox");
       const er = $("errorBox");
+
       if (b) {
         b.style.display = "block";
         b.textContent = msg;
       }
+
       if (er) {
         er.style.display = "none";
         er.textContent = "";
       }
+
       autoHideMsgs_(3000);
     }
 
@@ -390,10 +394,12 @@
 
       const er = $("errorBox");
       const ok = $("okBox");
+
       if (er) {
         er.style.display = "none";
         er.textContent = "";
       }
+
       if (ok) {
         ok.style.display = "none";
         ok.textContent = "";
@@ -404,6 +410,7 @@
       const ov = $("scanOverlay");
       if (!ov) return;
       ov.style.display = on ? "flex" : "none";
+
       const t = ov.querySelector(".scanText");
       if (t) t.textContent = msg || (on ? "Leyendo QR…" : "");
     }
@@ -453,6 +460,7 @@
       } catch {
         throw new Error("Respuesta no JSON: " + text);
       }
+
       return data;
     }
 
@@ -469,6 +477,7 @@
       } catch {
         throw new Error("Respuesta no JSON: " + text);
       }
+
       return data;
     }
 
@@ -615,6 +624,7 @@
         btn.disabled = true;
         btn.textContent = "Marcando…";
       }
+
       setLoading_(true, "Marcando llegada…");
 
       try {
@@ -681,78 +691,61 @@
       video.srcObject = videoStream;
       video.setAttribute("playsinline", true);
       await video.play();
-
-      // Dar tiempo a que enfoque mejor
       await sleep_(500);
     }
 
-   async function scanLoop_() {
-  const video = $("video");
-  const canvas = $("scanCanvas");
-  if (!video || !canvas) throw new Error("No existe video/canvas.");
-  if (typeof jsQR !== "function") throw new Error("jsQR no está cargado.");
-
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  if (!ctx) throw new Error("No se pudo obtener contexto del canvas.");
-
-  const mySession = scannerSessionId;
-  scannerRunning = true;
-
-  while (scannerRunning && mySession === scannerSessionId) {
-    if (currentToken || isProcessingTicket) {
-      await sleep_(100);
-      continue;
-    }
-
-    const vw = video.videoWidth || 0;
-    const vh = video.videoHeight || 0;
-
-    if (!vw || !vh) {
-      await sleep_(100);
-      continue;
-    }
-
-    // Reducir tamaño del frame para mejorar rendimiento y estabilidad
-    const maxWidth = 900;
-    const scale = Math.min(1, maxWidth / vw);
-    const sw = Math.floor(vw * scale);
-    const sh = Math.floor(vh * scale);
-
-    canvas.width = sw;
-    canvas.height = sh;
-    ctx.drawImage(video, 0, 0, sw, sh);
-
-    try {
-      const imageData = ctx.getImageData(0, 0, sw, sh);
-      const qr = jsQR(imageData.data, imageData.width, imageData.height, {
-        inversionAttempts: "attemptBoth"
-      });
-
-      if (qr && qr.data) {
-        const raw = qr.data;
-        const token = extractTokenFromQrText(raw);
-
-        if (token) {
-          setLoading_(true, "QR detectado…");
-          await loadAndShowTicket_(token, raw);
-          await sleep_(250);
-        }
+    async function ensureZXing_() {
+      if (!window.ZXingBrowser?.BrowserQRCodeReader) {
+        throw new Error("ZXing no está disponible desde CDN.");
       }
-    } catch (e) {
-      console.warn("Error leyendo frame:", e);
     }
 
-    await sleep_(80);
-  }
-}
+    async function scanLoop_() {
+      const video = $("video");
+      if (!video) throw new Error("No existe #video");
+
+      await ensureZXing_();
+
+      const mySession = scannerSessionId;
+      zxingReader = new ZXingBrowser.BrowserQRCodeReader();
+      scanning = true;
+
+      try {
+        await zxingReader.decodeFromVideoElement(video, async (result, err) => {
+          if (!scanning) return;
+          if (mySession !== scannerSessionId) return;
+          if (currentToken || isProcessingTicket) return;
+
+          if (result) {
+            const raw = result.getText ? result.getText() : "";
+            const token = extractTokenFromQrText(raw);
+
+            if (token) {
+              setLoading_(true, "QR detectado…");
+              await loadAndShowTicket_(token, raw);
+              await sleep_(250);
+            }
+            return;
+          }
+
+          // ignorar errores normales de “no QR en este frame”
+          if (err && err.name && String(err.name).includes("NotFound")) {
+            return;
+          }
+        });
+      } catch (e) {
+        throw new Error("ZXing no pudo iniciar el lector: " + (e?.message || e));
+      }
+    }
 
     function stopScanner_() {
       scannerSessionId++;
+      scanning = false;
       scannerRunning = false;
 
-      if (scanFrameTimer) {
-        clearTimeout(scanFrameTimer);
-        scanFrameTimer = null;
+      if (zxingReader) {
+        try { zxingReader.reset(); } catch (_) {}
+        zxingReader = null;
       }
 
       const video = $("video");
@@ -783,6 +776,7 @@
       setLoading_(false);
 
       startInProgress = true;
+      scannerRunning = true;
 
       try {
         await startCamera_();
@@ -791,6 +785,7 @@
         showError("No se pudo iniciar la cámara: " + (e?.message || e));
         setSubtitle("Error de cámara");
         startInProgress = false;
+        scannerRunning = false;
         return;
       }
 
