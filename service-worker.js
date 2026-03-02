@@ -1,23 +1,38 @@
-const CACHE = "staff-cache-v1";
+const CACHE = "staff-cache-v2";
 const ASSETS = [
-  "/staff/index.html",
-  "/staff/staff-scan.html",
-  "/staff/manifest-staff.webmanifest",
-  "/staff/icons/icon.png"
+  "./index.html",
+  "./staff-scan.html",
+  "./staff-search.html",
+  "./manifest-staff.webmanifest",
+  "./icons/icon.png"
 ];
 
 self.addEventListener("install", (e) => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));
+  e.waitUntil(
+    caches.open(CACHE).then(async (cache) => {
+      for (const asset of ASSETS) {
+        try {
+          await cache.add(asset);
+        } catch (err) {
+          console.warn("No se pudo cachear:", asset, err);
+        }
+      }
+    })
+  );
   self.skipWaiting();
 });
 
 self.addEventListener("activate", (e) => {
   e.waitUntil(
-    caches.keys().then(keys => Promise.all(keys.map(k => k !== CACHE ? caches.delete(k) : null)))
+    caches.keys().then(keys =>
+      Promise.all(keys.map(k => k !== CACHE ? caches.delete(k) : null))
+    )
   );
   self.clients.claim();
 });
 
 self.addEventListener("fetch", (e) => {
-  e.respondWith(caches.match(e.request).then(c => c || fetch(e.request)));
+  e.respondWith(
+    caches.match(e.request).then(cached => cached || fetch(e.request))
+  );
 });
