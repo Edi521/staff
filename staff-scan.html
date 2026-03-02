@@ -679,62 +679,72 @@
       });
 
       video.srcObject = videoStream;
+      video.setAttribute("playsinline", true);
       await video.play();
+
+      // Dar tiempo a que enfoque mejor
+      await sleep_(500);
     }
 
-    async function scanLoop_() {
-      const video = $("video");
-      const canvas = $("scanCanvas");
-      if (!video || !canvas) throw new Error("No existe video/canvas.");
-      if (typeof jsQR !== "function") throw new Error("jsQR no está cargado.");
+   async function scanLoop_() {
+  const video = $("video");
+  const canvas = $("scanCanvas");
+  if (!video || !canvas) throw new Error("No existe video/canvas.");
+  if (typeof jsQR !== "function") throw new Error("jsQR no está cargado.");
 
-      const ctx = canvas.getContext("2d", { willReadFrequently: true });
-      if (!ctx) throw new Error("No se pudo obtener contexto del canvas.");
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) throw new Error("No se pudo obtener contexto del canvas.");
 
-      const mySession = scannerSessionId;
-      scannerRunning = true;
+  const mySession = scannerSessionId;
+  scannerRunning = true;
 
-      while (scannerRunning && mySession === scannerSessionId) {
-        if (currentToken || isProcessingTicket) {
-          await sleep_(120);
-          continue;
+  while (scannerRunning && mySession === scannerSessionId) {
+    if (currentToken || isProcessingTicket) {
+      await sleep_(100);
+      continue;
+    }
+
+    const vw = video.videoWidth || 0;
+    const vh = video.videoHeight || 0;
+
+    if (!vw || !vh) {
+      await sleep_(100);
+      continue;
+    }
+
+    // Reducir tamaño del frame para mejorar rendimiento y estabilidad
+    const maxWidth = 900;
+    const scale = Math.min(1, maxWidth / vw);
+    const sw = Math.floor(vw * scale);
+    const sh = Math.floor(vh * scale);
+
+    canvas.width = sw;
+    canvas.height = sh;
+    ctx.drawImage(video, 0, 0, sw, sh);
+
+    try {
+      const imageData = ctx.getImageData(0, 0, sw, sh);
+      const qr = jsQR(imageData.data, imageData.width, imageData.height, {
+        inversionAttempts: "attemptBoth"
+      });
+
+      if (qr && qr.data) {
+        const raw = qr.data;
+        const token = extractTokenFromQrText(raw);
+
+        if (token) {
+          setLoading_(true, "QR detectado…");
+          await loadAndShowTicket_(token, raw);
+          await sleep_(250);
         }
-
-        const vw = video.videoWidth || 0;
-        const vh = video.videoHeight || 0;
-
-        if (!vw || !vh) {
-          await sleep_(120);
-          continue;
-        }
-
-        canvas.width = vw;
-        canvas.height = vh;
-        ctx.drawImage(video, 0, 0, vw, vh);
-
-        try {
-          const imageData = ctx.getImageData(0, 0, vw, vh);
-          const qr = jsQR(imageData.data, imageData.width, imageData.height, {
-            inversionAttempts: "dontInvert"
-          });
-
-          if (qr && qr.data) {
-            const raw = qr.data;
-            const token = extractTokenFromQrText(raw);
-
-            if (token) {
-              setLoading_(true, "QR detectado…");
-              await loadAndShowTicket_(token, raw);
-              await sleep_(250);
-            }
-          }
-        } catch (e) {
-          console.warn("Error leyendo frame:", e);
-        }
-
-        await sleep_(120);
       }
+    } catch (e) {
+      console.warn("Error leyendo frame:", e);
     }
+
+    await sleep_(80);
+  }
+}
 
     function stopScanner_() {
       scannerSessionId++;
